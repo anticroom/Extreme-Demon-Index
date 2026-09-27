@@ -21,7 +21,7 @@ export default {
             <Spinner></Spinner>
         </main>
         <main v-else class="page-list">
-            <div class="list-container">
+            <div class="list-container" ref="listContainer" @scroll.passive="syncRows">
                 <!-- SEARCH BOX: inserted here (above the levels list) -->
                 <div id="level-search-wrapper" style="padding:16px;">
                   <!-- Toggle buttons: Classic / Upcoming -->
@@ -49,8 +49,7 @@ export default {
 
                   <input
                     id="levelSearch"
-                    :value="searchInput"
-                    @input="onSearchInput"
+                    v-model="searchQuery"
                     type="search"
                     placeholder="Search levels..."
                     aria-label="Search levels"
@@ -59,9 +58,11 @@ export default {
                   />
                 </div>
 
+                <div ref="listTop" :style="{ height: padTop + 'px' }"></div>
+
                 <!-- Classic List View with Legacy Levels -->
-                <table class="list" v-if="list && activeList === 'classic'">
-                    <template v-for="(entry, i) in filteredDemonListClassic">
+                <table class="list" ref="listTable" v-if="list && activeList === 'classic'">
+                    <template v-for="(entry, i) in visibleRows">
                         <tr v-if="entry.isLegacySeparator" :key="'separator-' + i" class="legacy-separator-row">
                             <td colspan="2" class="legacy-separator">Legacy List</td>
                         </tr>
@@ -80,8 +81,8 @@ export default {
                 </table>
 
                 <!-- Upcoming List View (original behavior) -->
-                <table class="list" v-if="list && activeList === 'upcoming'">
-                    <tr v-for="(entry, i) in filteredDemonList" :key="entry.index" :class="{ benchmark: entry.isBenchmark }">
+                <table class="list" ref="listTable" v-if="list && activeList === 'upcoming'">
+                    <tr v-for="(entry, i) in visibleRows" :key="entry.index" :class="{ benchmark: entry.isBenchmark }">
                         <td class="rank">
                             <p class="type-label-lg" v-if="!entry.isBenchmark && activeList !== 'upcoming'">#{{ entry.displayIndex }}</p>
                             <p class="type-label-md" v-else style="margin-left:8px;">-</p>
@@ -96,6 +97,7 @@ export default {
                         </td>
                     </tr>
                 </table>
+                <div :style="{ height: padBottom + 'px' }"></div>
             </div>
             <div class="level-container">
                 <div class="level" v-if="level">
@@ -200,9 +202,13 @@ export default {
         store,
         isLoading: false,
         hasLoaded: false,
+        listLevel: null,
         toggledShowcase: false,
         searchQuery: '',
-        searchInput: '',
+        rowStart: 0,
+        rowEnd: 0,
+        padTop: 0,
+        padBottom: 0,
         isLegacyLevel: false
     }),
     computed: {
@@ -254,20 +260,20 @@ export default {
 
         baseDemonList() {
             let rank = 0;
-            return this.demonList.map((name, idx) => {
+            return Object.freeze(this.demonList.map((name, idx) => {
                 const raw = (typeof name === 'string') ? name.trim() : name;
                 const lower = typeof raw === 'string' ? raw.toLowerCase() : '';
                 const isBench = !!lower && lower.startsWith('-') && lower !== '-critical error-' && lower !== '-à la belle étoile-';
                 const displayName = isBench ? raw.replace(/^[-\s]+/, '') : raw;
-                return {
+                return Object.freeze({
                     name: displayName,
                     index: idx,
                     isBenchmark: isBench,
                     rawName: raw,
                     displayIndex: isBench ? null : ++rank,
                     searchName: displayName ? displayName.toLowerCase() : ''
-                };
-            });
+                });
+            }));
         },
 
         baseDemonListClassic() {
@@ -281,7 +287,7 @@ export default {
                 const isLegacy = !!lower && lower.startsWith('-') && !lower.startsWith('-critical error') && !lower.startsWith('-à la belle étoile');
                 const isBench = !!lower && lower.startsWith('-') && !isLegacy && lower !== '-critical error-' && lower !== '-à la belle étoile-';
                 const displayName = (isBench || isLegacy) ? raw.replace(/^[-\s]+/, '') : raw;
-                const entry = {
+                const entry = Object.freeze({
                     name: displayName,
                     index: idx,
                     isBenchmark: isBench,
@@ -290,27 +296,36 @@ export default {
                     isLegacySeparator: false,
                     displayIndex: (isBench || isLegacy) ? null : ++rank,
                     searchName: displayName ? displayName.toLowerCase() : ''
-                };
+                });
                 if (isLegacy && !addedSeparator) {
-                    result.push({ isLegacySeparator: true, index: -1 });
+                    result.push(Object.freeze({ isLegacySeparator: true, index: -1 }));
                     addedSeparator = true;
                 }
                 result.push(entry);
                 plain.push(entry);
             });
-            return { withSeparator: result, plain };
+            return Object.freeze({ withSeparator: Object.freeze(result), plain: Object.freeze(plain) });
         },
 
         filteredDemonList() {
-            const q = this.searchQuery;
+            const q = this.searchQuery.toLowerCase().trim();
             if (!q) return this.baseDemonList;
             return this.baseDemonList.filter(entry => entry.searchName.includes(q));
         },
 
         filteredDemonListClassic() {
-            const q = this.searchQuery;
+            const q = this.searchQuery.toLowerCase().trim();
             if (!q) return this.baseDemonListClassic.withSeparator;
             return this.baseDemonListClassic.plain.filter(entry => entry.searchName.includes(q));
+        },
+
+        rows() {
+            if (!this.list) return [];
+            return this.activeList === 'classic' ? this.filteredDemonListClassic : this.filteredDemonList;
+        },
+
+        visibleRows() {
+            return this.rows.slice(this.rowStart, this.rowEnd);
         },
 
         records() {
@@ -357,15 +372,17 @@ export default {
             return '';
         }
     },
+    created() {
+        this.rowHeights = new Map();
+        this.rowOffsets = [0];
+    },
     async mounted() {
         if (!localStorage.getItem('edi_active_list')) {
             localStorage.setItem('edi_active_list', 'classic');
         }
 
+        const pending = Promise.all([fetchRecords(), fetchEditors(), fetchPacks()]);
         this.demonList = await fetchList();
-        this.recordList = await fetchRecords();
-        this.editors = await fetchEditors();
-        this.packs = await fetchPacks();
         
         const queryLevel = this.$route.query.level;
         if (queryLevel) {
@@ -373,18 +390,15 @@ export default {
             if (this.selected === -1) this.selected = 0;
         }
         
-        this.listLevel = await fetchLevel(this.list[this.selected])
-        this.hasLoaded = true;
-        this.checkIfLegacy();
-
         if (this.activeList === 'upcoming') {
             const firstNonBench = this.baseDemonList.find(entry => !entry.isBenchmark);
-            if (firstNonBench && firstNonBench.index !== this.selected) {
-                this.selected = firstNonBench.index;
-                this.listLevel = await fetchLevel(this.list[this.selected]);
-                this.checkIfLegacy();
-            }
+            if (firstNonBench) this.selected = firstNonBench.index;
         }
+
+        this.listLevel = await fetchLevel(this.list[this.selected]);
+        [this.recordList, this.editors, this.packs] = await pending;
+        this.hasLoaded = true;
+        this.checkIfLegacy();
 
         if (!this.list) {
             this.errors = [
@@ -397,6 +411,13 @@ export default {
         }
 
         this.loading = false;
+        window.addEventListener('resize', this.onResize);
+    },
+    updated() {
+        this.syncRows();
+    },
+    beforeUnmount() {
+        window.removeEventListener('resize', this.onResize);
     },
     methods: {
         embed,
@@ -406,12 +427,72 @@ export default {
             localStorage.setItem('edi_active_list', key);
             location.reload();
         },
-        onSearchInput(e) {
-            this.searchInput = e.target.value;
-            clearTimeout(this.searchTimer);
-            this.searchTimer = setTimeout(() => {
-                this.searchQuery = this.searchInput.toLowerCase().trim();
-            }, 150);
+
+        // list windowing stuff below
+        // I'm actually suprised this worked
+        // it brough search load time from like 500 ms to being near instant LMAO
+
+        measureRows() {
+            const table = this.$refs.listTable;
+            if (!table) return;
+            const rows = this.visibleRows;
+            Array.from(table.rows).forEach((tr, i) => {
+                if (rows[i]) this.rowHeights.set(rows[i].index, tr.getBoundingClientRect().height);
+            });
+        },
+        buildOffsets() { // finds where each row starts
+            let total = 0;
+            this.rowHeights.forEach(height => total += height);
+            const guess = this.rowHeights.size ? total / this.rowHeights.size : 44;
+            const offsets = [0];
+            this.rows.forEach((entry, i) => {
+                offsets.push(offsets[i] + (this.rowHeights.get(entry.index) || guess));
+            });
+            this.rowOffsets = offsets;
+            this.offsetRows = this.rows;
+        },
+        rowAt(y) {
+            const offsets = this.rowOffsets;
+            let low = 0;
+            let high = offsets.length - 2;
+            while (low < high) {
+                const mid = Math.ceil((low + high) / 2);
+                if (offsets[mid] <= y) low = mid;
+                else high = mid - 1;
+            }
+            return low;
+        },
+        updateWindow() { // defines which rows to draw 
+            const box = this.$refs.listContainer;
+            const top = this.$refs.listTop;
+            if (!box || !top) return;
+            const offsets = this.rowOffsets;
+            const y = box.getBoundingClientRect().top - top.getBoundingClientRect().top;
+            const first = this.rowAt(y);
+            const last = this.rowAt(y + box.clientHeight);
+            this.rowStart = Math.max(0, first - first % 10 - 10);
+            this.rowEnd = Math.min(offsets.length - 1, last - last % 10 + 20);
+            this.padTop = offsets[this.rowStart];
+            this.padBottom = offsets[offsets.length - 1] - offsets[this.rowEnd];
+        },
+        syncRows() { // rerun after each render and scroll
+            const box = this.$refs.listContainer;
+            const top = this.$refs.listTop;
+            if (!box || !top) return;
+            const offsets = this.rowOffsets;
+            const sameRows = this.offsetRows === this.rows;
+            const first = this.rowAt(box.getBoundingClientRect().top - top.getBoundingClientRect().top);
+            this.measureRows();
+            this.buildOffsets();
+            const shift = sameRows ? this.rowOffsets[first] - offsets[first] : 0; //stops the view from jumping
+            if (shift) box.scrollTop += shift;
+            this.updateWindow();
+        },
+        // give me a raise for this
+        // half a buck a year at least :cryign:
+        onResize() {
+            this.rowHeights.clear();
+            this.syncRows();
         },
         selectPack(pack) {
             this.$router.push({ path: '/packs', query: { pack: pack.name } });
@@ -429,7 +510,6 @@ export default {
             if (this.isLoading) {
                 return;
             }
-            this.hasLoaded = false
             this.isLoading = true;
             try {
                 console.log(i)
