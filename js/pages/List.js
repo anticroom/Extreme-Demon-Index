@@ -49,7 +49,8 @@ export default {
 
                   <input
                     id="levelSearch"
-                    v-model="searchQuery"
+                    :value="searchInput"
+                    @input="onSearchInput"
                     type="search"
                     placeholder="Search levels..."
                     aria-label="Search levels"
@@ -201,6 +202,7 @@ export default {
         hasLoaded: false,
         toggledShowcase: false,
         searchQuery: '',
+        searchInput: '',
         isLegacyLevel: false
     }),
     computed: {
@@ -250,77 +252,65 @@ export default {
             return this.packs.filter(pack => pack.levels.includes(this.level.name));
         },
 
-        filteredDemonList() {
-            const q = (this.searchQuery || '').toLowerCase().trim();
-
-            const items = this.demonList.map((name, idx) => {
-                const raw = (typeof name === 'string') ? name.trim() : name;
-                // strip any leading dashes/spaces from the displayed name (this prevents "- -name" when rank already shows '-')
-                const isBench = (typeof raw === 'string' && raw.startsWith('-') && raw.toLowerCase() !== '-critical error-' && raw.toLowerCase() !== '-à la belle étoile-');
-                const displayName = isBench ? raw.replace(/^[-\s]+/, '') : raw;
-                return { name: displayName, index: idx, isBenchmark: isBench, rawName: raw };
-            });
-
+        baseDemonList() {
             let rank = 0;
-            const withDisplay = items.map(item => {
-                if (!item.isBenchmark) {
-                    rank += 1;
-                    return { ...item, displayIndex: rank };
-                }
-                return { ...item, displayIndex: null };
-            });
-
-            if (!q) return withDisplay;
-            return withDisplay.filter(entry => {
-                if (!entry.name) return false;
-                return entry.name.toLowerCase().includes(q);
+            return this.demonList.map((name, idx) => {
+                const raw = (typeof name === 'string') ? name.trim() : name;
+                const lower = typeof raw === 'string' ? raw.toLowerCase() : '';
+                const isBench = !!lower && lower.startsWith('-') && lower !== '-critical error-' && lower !== '-à la belle étoile-';
+                const displayName = isBench ? raw.replace(/^[-\s]+/, '') : raw;
+                return {
+                    name: displayName,
+                    index: idx,
+                    isBenchmark: isBench,
+                    rawName: raw,
+                    displayIndex: isBench ? null : ++rank,
+                    searchName: displayName ? displayName.toLowerCase() : ''
+                };
             });
         },
 
-        filteredDemonListClassic() {
-            const q = (this.searchQuery || '').toLowerCase().trim();
-
-            const items = this.demonList.map((name, idx) => {
-                const raw = (typeof name === 'string') ? name.trim() : name;
-                const isLegacy = (typeof raw === 'string' && raw.startsWith('-') && !raw.toLowerCase().startsWith('-critical error') && !raw.toLowerCase().startsWith('-à la belle étoile'));
-                const isBench = (typeof raw === 'string' && raw.startsWith('-') && !isLegacy && raw.toLowerCase() !== '-critical error-' && raw.toLowerCase() !== '-à la belle étoile-');
-                // strip any leading dashes/spaces for list display to avoid duplicate dash when rank cell shows '-'
-                const displayName = (isBench || isLegacy) ? raw.replace(/^[-\s]+/, '') : raw;
-                return { name: displayName, index: idx, isBenchmark: isBench, isLegacy: isLegacy, rawName: raw, isLegacySeparator: false };
-            });
-
+        baseDemonListClassic() {
             let rank = 0;
-            let foundFirstLegacy = false;
-            const withDisplay = items.map(item => {
-                if (!item.isBenchmark && !item.isLegacy) {
-                    rank += 1;
-                    return { ...item, displayIndex: rank };
+            let addedSeparator = false;
+            const result = [];
+            const plain = [];
+            this.demonList.forEach((name, idx) => {
+                const raw = (typeof name === 'string') ? name.trim() : name;
+                const lower = typeof raw === 'string' ? raw.toLowerCase() : '';
+                const isLegacy = !!lower && lower.startsWith('-') && !lower.startsWith('-critical error') && !lower.startsWith('-à la belle étoile');
+                const isBench = !!lower && lower.startsWith('-') && !isLegacy && lower !== '-critical error-' && lower !== '-à la belle étoile-';
+                const displayName = (isBench || isLegacy) ? raw.replace(/^[-\s]+/, '') : raw;
+                const entry = {
+                    name: displayName,
+                    index: idx,
+                    isBenchmark: isBench,
+                    isLegacy,
+                    rawName: raw,
+                    isLegacySeparator: false,
+                    displayIndex: (isBench || isLegacy) ? null : ++rank,
+                    searchName: displayName ? displayName.toLowerCase() : ''
+                };
+                if (isLegacy && !addedSeparator) {
+                    result.push({ isLegacySeparator: true, index: -1 });
+                    addedSeparator = true;
                 }
-                if (item.isLegacy && !foundFirstLegacy && !q) {
-                    foundFirstLegacy = true;
-                }
-                return { ...item, displayIndex: null };
+                result.push(entry);
+                plain.push(entry);
             });
+            return { withSeparator: result, plain };
+        },
 
-            // Build result with separator if needed
-            if (!q) {
-                const result = [];
-                let addedSeparator = false;
-                for (const entry of withDisplay) {
-                    if (entry.isLegacy && !addedSeparator) {
-                        result.push({ isLegacySeparator: true, index: -1 });
-                        addedSeparator = true;
-                    }
-                    result.push(entry);
-                }
-                return result;
-            }
+        filteredDemonList() {
+            const q = this.searchQuery;
+            if (!q) return this.baseDemonList;
+            return this.baseDemonList.filter(entry => entry.searchName.includes(q));
+        },
 
-            // When searching, filter without separator
-            return withDisplay.filter(entry => {
-                if (!entry.name) return false;
-                return entry.name.toLowerCase().includes(q);
-            });
+        filteredDemonListClassic() {
+            const q = this.searchQuery;
+            if (!q) return this.baseDemonListClassic.withSeparator;
+            return this.baseDemonListClassic.plain.filter(entry => entry.searchName.includes(q));
         },
 
         records() {
@@ -388,7 +378,7 @@ export default {
         this.checkIfLegacy();
 
         if (this.activeList === 'upcoming') {
-            const firstNonBench = this.filteredDemonList.find(entry => !entry.isBenchmark);
+            const firstNonBench = this.baseDemonList.find(entry => !entry.isBenchmark);
             if (firstNonBench && firstNonBench.index !== this.selected) {
                 this.selected = firstNonBench.index;
                 this.listLevel = await fetchLevel(this.list[this.selected]);
@@ -416,15 +406,22 @@ export default {
             localStorage.setItem('edi_active_list', key);
             location.reload();
         },
+        onSearchInput(e) {
+            this.searchInput = e.target.value;
+            clearTimeout(this.searchTimer);
+            this.searchTimer = setTimeout(() => {
+                this.searchQuery = this.searchInput.toLowerCase().trim();
+            }, 150);
+        },
         selectPack(pack) {
             this.$router.push({ path: '/packs', query: { pack: pack.name } });
         },
         checkIfLegacy() {
             let entry;
             if (this.activeList === 'classic') {
-                entry = this.filteredDemonListClassic.find(e => e.index === this.selected && !e.isLegacySeparator);
+                entry = this.baseDemonListClassic.plain[this.selected];
             } else {
-                entry = this.filteredDemonList.find(e => e.index === this.selected);
+                entry = this.baseDemonList[this.selected];
             }
             this.isLegacyLevel = entry ? entry.isLegacy : false;
         },
